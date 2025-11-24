@@ -1,0 +1,21 @@
+<!-- templates/result.html -->
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>Результат</title></head>
+<body style="font-family: Arial; margin: 40px; text-align: center;">
+    <h1 style="color: {% if result.status == 'Выполнимо' %}green{% else %}red{% endif %}">
+        {{ result.status }}
+    </h1>
+    <p><b>Детали:</b> {{ result.details }}</p>
+    
+    {% if result.plan %}
+        <h2>План выполнения:</h2>
+        <pre style="background:#f0f0f0; padding:15px; text-align:left; display:inline-block;">
+{{ result.plan }}
+        </pre>
+    {% endif %}
+    
+    <hr>
+    <a href="/dashboard">← Вернуться в личный кабинет</a>
+</body>
+</html>

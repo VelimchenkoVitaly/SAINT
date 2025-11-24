@@ -151,12 +151,11 @@ def upload():
         return redirect(url_for('login'))
     
     file = request.files['file']
-    if file and file.filename.endswith(('.txt', '.docx')):
+    if file and file.filename.endswith('.txt'):
         filename = secure_filename(file.filename)
         file_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
         file.save(file_path)
         
-        # Чтение текста (для .docx нужно docx2txt, но для простоты assume .txt)
         with open(file_path, 'r', encoding='utf-8') as f:
             text = f.read()
         
@@ -166,13 +165,19 @@ def upload():
         
         entities = parse_text(text)
         if entities:
-            result = apply_rules(entities)
-            analysis = AnalysisResult(document_id=doc.id, status=result['status'], details=result['details'], execution_plan=result['plan'])
-            db.session.add(analysis)
-            db.session.commit()
-            return render_template('result.html', result=result)
+            analysis_result = apply_rules(entities)
+            # ← ИСПРАВЛЕНИЕ ЗДЕСЬ: всегда передаём plan (даже если None)
+            result_for_template = {
+                'status': analysis_result['status'],
+                'details': analysis_result['details'],
+                'plan': analysis_result.get('plan')  # может быть None — это нормально
+            }
+            return render_template('result.html', result=result_for_template)
         else:
-            flash('Команда не распознана')
+            flash('Команда не распознана. Пример: "Перевести поезд №123 с платформы 1 на платформу 5"')
+            return redirect(url_for('dashboard'))
+    else:
+        flash('Загружайте только .txt файлы')
     return redirect(url_for('dashboard'))
 
 @app.route('/logout')
