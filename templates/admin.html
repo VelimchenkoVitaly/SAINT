@@ -1,6 +1,20 @@
+<!-- admin.html (расширен для панели) -->
 <!DOCTYPE html>
 <html><head><title>Администратор</title></head><body>
     <h1>Панель администратора</h1>
-    <p>В первой версии настройка онтологии и правил будет в следующих витках спирали</p>
-    <p><a href="/logout">Выйти</a></p>
+    <h2>Добавить шаблон команды</h2>
+    <form method="post" action="/admin/add_rule">
+        <p>Название: <input type="text" name="name" required></p>
+        <p>Regex шаблон: <input type="text" name="pattern" required></p>
+        <p>Условия (JSON): <textarea name="conditions" required></textarea></p>
+        <p>Заключение (JSON): <textarea name="conclusion" required></textarea></p>
+        <button type="submit">Добавить</button>
+    </form>
+    <h2>Существующие шаблоны</h2>
+    <ul>
+    {% for rule in rules %}
+        <li>{{ rule.name }} (ID: {{ rule.id }})</li>
+    {% endfor %}
+    </ul>
+    <a href="/logout">Выйти</a>
 </body></html>
