@@ -3,6 +3,8 @@
 # 1. Расширенная онтология: Добавлены сущности Поезд, Платформа, Путь, Бригада, Вагон в симулированную БД и модели OntologyEntity, OntologyAttribute.
 # 2. 12 шаблонов команд: Перевод, Перестановка, Прицепка, Отцепка, Отправление, Осмотр, Назначение бригады, Смена пути, Проверка вагона, Формирование состава, Разформирование, Задержка отправления.
 # 3. Админ-панель: Маршрут /admin с формой для добавления/редактирования шаблонов (хранятся в БД как Rules, без перезапусков).
+# 4. Динамический парсинг: parse_text теперь использует patterns из БД.
+# 5. Динамический apply_rules: Парсит JSON conditions и conclusion для кастомных правил.
 # Установка: pip install flask flask-sqlalchemy nltk
 # Запуск: python app.py
 # Доступ: http://127.0.0.1:5000/
@@ -103,42 +105,54 @@ default_ontology = {
     'Вагон': {'db_table': 'wagons', 'attributes': {'ИД': 'wagon_id', 'Статус': 'status', 'Осмотр': 'inspection'}}
 }
 
-# 12 шаблонов команд (regex)
+# Динамический парсинг: Загружает все patterns из БД
 def parse_text(text):
-    patterns = [
-        # 1. Перевод поезда
-        (r'Перевести поезд №(\d+) с платформы (\d+) на платформу (\d+)', 'Перевод поезда', {'train_number': 1, 'from_platform': 2, 'to_platform': 3}),
-        # 2. Перестановка поезда
-        (r'Переставить поезд №(\d+) на платформу (\d+)', 'Перестановка поезда', {'train_number': 1, 'to_platform': 2}),
-        # 3. Прицепка вагона
-        (r'Прицепить вагон (\w+) к поезду №(\d+)', 'Прицепка вагона', {'wagon_id': 1, 'train_number': 2}),
-        # 4. Отцепка вагона
-        (r'Отцепить вагон (\w+) от поезда №(\d+)', 'Отцепка вагона', {'wagon_id': 1, 'train_number': 2}),
-        # 5. Отправление поезда
-        (r'Отправить поезд №(\d+) с платформы (\d+)', 'Отправление поезда', {'train_number': 1, 'platform': 2}),
-        # 6. Осмотр поезда
-        (r'Провести осмотр поезда №(\d+)', 'Осмотр поезда', {'train_number': 1}),
-        # 7. Назначение бригады
-        (r'Назначить бригаду (\w+) поезду №(\d+)', 'Назначение бригады', {'brigade_id': 1, 'train_number': 2}),
-        # 8. Смена пути
-        (r'Сменить путь (\w+) для поезда №(\d+)', 'Смена пути', {'track_id': 1, 'train_number': 2}),
-        # 9. Проверка вагона
-        (r'Проверить вагон (\w+)', 'Проверка вагона', {'wagon_id': 1}),
-        # 10. Формирование состава
-        (r'Сформировать состав поезда №(\d+) с вагонами (\w+)', 'Формирование состава', {'train_number': 1, 'wagons': 2}),
-        # 11. Разформирование состава
-        (r'Разформировать состав поезда №(\d+)', 'Разформирование состава', {'train_number': 1}),
-        # 12. Задержка отправления
-        (r'Задержать отправление поезда №(\d+) на (\d+) минут', 'Задержка отправления', {'train_number': 1, 'delay': 2})
-    ]
-    
-    for pattern, action, keys in patterns:
-        match = re.search(pattern, text)
+    rules = Rule.query.all()
+    for rule in rules:
+        match = re.search(rule.pattern, text)
         if match:
-            entities = {list(keys.keys())[i]: match.group(i+1) for i in range(len(keys))}
-            entities['action'] = action
+            entities = {'action': rule.name}
+            # Извлекаем группы из match (предполагаем, что pattern имеет группы, e.g. (\d+))
+            for i in range(1, len(match.groups()) + 1):
+                entities[f'group{i}'] = match.group(i)  # Динамически сохраняем группы
+            entities['rule_id'] = rule.id  # Для ссылки на rule в apply_rules
             return entities
     return None
+
+# Динамический apply_rules: Парсит JSON conditions и conclusion
+def apply_rules(entities):
+    if 'rule_id' in entities:
+        rule = Rule.query.get(entities['rule_id'])
+        if rule:
+            try:
+                conditions_data = json.loads(rule.conditions)
+                # Если conditions — не список (один объект), обернуть в список
+                if not isinstance(conditions_data, list):
+                    conditions_data = [conditions_data]
+                conditions = conditions_data
+                conclusion = json.loads(rule.conclusion)
+            except json.JSONDecodeError:
+                return {'status': 'Не выполнимо', 'details': 'Неверный JSON в правиле.', 'plan': None}
+            
+            reasons = []
+            for cond in conditions:
+                if cond.get('check') == 'exists':
+                    entity = cond.get('entity')
+                    ontology = OntologyEntity.query.filter_by(name=entity).first()
+                    if ontology:
+                        table = ontology.db_table
+                        attributes = json.loads(ontology.attributes)
+                        field = attributes.get('Номер', 'id')  # Дефолт field
+                        value = entities.get('group1')  # Предполагаем первую группу — номер
+                        if not query_external_db(table, field, value):
+                            reasons.append(f'{entity} не существует.')
+            
+            if not reasons:
+                return {'status': conclusion.get('status', 'Выполнимо'), 'details': 'Условия соблюдены.', 'plan': conclusion.get('plan')}
+            else:
+                return {'status': 'Не выполнимо', 'details': ' '.join(reasons), 'plan': None}
+    
+    return {'status': 'Не выполнимо', 'details': 'Команда не поддерживается.', 'plan': None}
 
 # Запрос к симулированной БД
 def query_external_db(table, field, value):
@@ -148,122 +162,7 @@ def query_external_db(table, field, value):
             return item
     return None
 
-# Полная реализация apply_rules для всех 12 команд
-def apply_rules(entities):
-    action = entities['action']
-    reasons = []
-    plan = 'Шаг 1: Подготовка. Шаг 2: Выполнение. Шаг 3: Фиксация.'  # Дефолтный план
-    
-    if action == 'Перевод поезда':
-        train = query_external_db('trains', 'train_number', entities['train_number'])
-        from_platform = query_external_db('platforms', 'platform_number', entities['from_platform'])
-        to_platform = query_external_db('platforms', 'platform_number', entities['to_platform'])
-        if train and from_platform and to_platform and to_platform['is_occupied'] == False and train['status'] != 'в пути':
-            return {'status': 'Выполнимо', 'details': 'Условия соблюдены.', 'plan': plan}
-        if not train: reasons.append('Поезд не существует.')
-        if not to_platform: reasons.append('Целевая платформа не существует.')
-        if to_platform and to_platform['is_occupied']: reasons.append('Целевая платформа занята.')
-        if train and train['status'] == 'в пути': reasons.append('Поезд в пути.')
-    
-    elif action == 'Перестановка поезда':
-        train = query_external_db('trains', 'train_number', entities['train_number'])
-        to_platform = query_external_db('platforms', 'platform_number', entities['to_platform'])
-        if train and to_platform and to_platform['is_occupied'] == False and train['status'] == 'на платформе':
-            return {'status': 'Выполнимо', 'details': 'Условия соблюдены.', 'plan': plan.replace('Выполнение', 'Перестановка')}
-        if not train: reasons.append('Поезд не существует.')
-        if not to_platform: reasons.append('Платформа не существует.')
-        if to_platform and to_platform['is_occupied']: reasons.append('Платформа занята.')
-        if train and train['status'] != 'на платформе': reasons.append('Поезд не на платформе.')
-    
-    elif action == 'Прицепка вагона':
-        wagon = query_external_db('wagons', 'wagon_id', entities['wagon_id'])
-        train = query_external_db('trains', 'train_number', entities['train_number'])
-        if wagon and train and wagon['status'] == 'свободен' and wagon['inspection'] == 'OK':
-            return {'status': 'Выполнимо', 'details': 'Условия соблюдены.', 'plan': plan.replace('Выполнение', 'Прицепка вагона')}
-        if not wagon: reasons.append('Вагон не существует.')
-        if not train: reasons.append('Поезд не существует.')
-        if wagon and wagon['status'] != 'свободен': reasons.append('Вагон не свободен.')
-        if wagon and wagon['inspection'] != 'OK': reasons.append('Вагон требует осмотра.')
-    
-    elif action == 'Отцепка вагона':
-        wagon = query_external_db('wagons', 'wagon_id', entities['wagon_id'])
-        train = query_external_db('trains', 'train_number', entities['train_number'])
-        if wagon and train and entities['wagon_id'] in train['wagons']:
-            return {'status': 'Выполнимо', 'details': 'Условия соблюдены.', 'plan': plan.replace('Выполнение', 'Отцепка вагона')}
-        if not wagon: reasons.append('Вагон не существует.')
-        if not train: reasons.append('Поезд не существует.')
-        if wagon and entities['wagon_id'] not in train['wagons']: reasons.append('Вагон не прикреплён к поезду.')
-    
-    elif action == 'Отправление поезда':
-        train = query_external_db('trains', 'train_number', entities['train_number'])
-        platform = query_external_db('platforms', 'platform_number', entities['platform'])
-        if train and platform and train['brigade_id'] and train['status'] == 'на платформе' and platform['is_occupied']:
-            return {'status': 'Выполнимо', 'details': 'Условия соблюдены.', 'plan': plan.replace('Выполнение', 'Отправление')}
-        if not train: reasons.append('Поезд не существует.')
-        if not platform: reasons.append('Платформа не существует.')
-        if train and not train['brigade_id']: reasons.append('Нет бригады.')
-        if train and train['status'] != 'на платформе': reasons.append('Поезд не на платформе.')
-    
-    elif action == 'Осмотр поезда':
-        train = query_external_db('trains', 'train_number', entities['train_number'])
-        if train:
-            return {'status': 'Выполнимо', 'details': 'Условия соблюдены.', 'plan': plan.replace('Выполнение', 'Осмотр поезда')}
-        if not train: reasons.append('Поезд не существует.')
-    
-    elif action == 'Назначение бригады':
-        brigade = query_external_db('brigades', 'brigade_id', entities['brigade_id'])
-        train = query_external_db('trains', 'train_number', entities['train_number'])
-        if brigade and train and brigade['status'] == 'свободна' and not train['brigade_id']:
-            return {'status': 'Выполнимо', 'details': 'Условия соблюдены.', 'plan': plan.replace('Выполнение', 'Назначение бригады')}
-        if not brigade: reasons.append('Бригада не существует.')
-        if not train: reasons.append('Поезд не существует.')
-        if brigade and brigade['status'] != 'свободна': reasons.append('Бригада занята.')
-        if train and train['brigade_id']: reasons.append('Поезд уже имеет бригаду.')
-    
-    elif action == 'Смена пути':
-        track = query_external_db('tracks', 'track_id', entities['track_id'])
-        train = query_external_db('trains', 'train_number', entities['train_number'])
-        if track and train and track['status'] == 'свободен':
-            return {'status': 'Выполнимо', 'details': 'Условия соблюдены.', 'plan': plan.replace('Выполнение', 'Смена пути')}
-        if not track: reasons.append('Путь не существует.')
-        if not train: reasons.append('Поезд не существует.')
-        if track and track['status'] != 'свободен': reasons.append('Путь занят.')
-    
-    elif action == 'Проверка вагона':
-        wagon = query_external_db('wagons', 'wagon_id', entities['wagon_id'])
-        if wagon and wagon['inspection'] == 'OK':
-            return {'status': 'Выполнимо', 'details': 'Условия соблюдены.', 'plan': plan.replace('Выполнение', 'Проверка вагона')}
-        if not wagon: reasons.append('Вагон не существует.')
-        if wagon and wagon['inspection'] != 'OK': reasons.append('Вагон требует осмотра.')
-    
-    elif action == 'Формирование состава':
-        train = query_external_db('trains', 'train_number', entities['train_number'])
-        wagons = [query_external_db('wagons', 'wagon_id', w.strip()) for w in entities['wagons'].split(',')]
-        if train and all(wagons) and all(w['status'] == 'свободен' for w in wagons if w):
-            return {'status': 'Выполнимо', 'details': 'Условия соблюдены.', 'plan': plan.replace('Выполнение', 'Формирование состава')}
-        if not train: reasons.append('Поезд не существует.')
-        if not all(wagons): reasons.append('Один или более вагонов не существуют.')
-        if any(w['status'] != 'свободен' for w in wagons if w): reasons.append('Вагон не свободен.')
-    
-    elif action == 'Разформирование состава':
-        train = query_external_db('trains', 'train_number', entities['train_number'])
-        if train and train['wagons']:
-            return {'status': 'Выполнимо', 'details': 'Условия соблюдены.', 'plan': plan.replace('Выполнение', 'Разформирование состава')}
-        if not train: reasons.append('Поезд не существует.')
-        if train and not train['wagons']: reasons.append('Состав пуст.')
-    
-    elif action == 'Задержка отправления':
-        train = query_external_db('trains', 'train_number', entities['train_number'])
-        if train and train['status'] == 'на платформе':
-            return {'status': 'Выполнимо', 'details': 'Условия соблюдены.', 'plan': plan.replace('Выполнение', f'Задержка на {entities["delay"]} минут')}
-        if not train: reasons.append('Поезд не существует.')
-        if train and train['status'] != 'на платформе': reasons.append('Поезд не на платформе.')
-    
-    if reasons:
-        return {'status': 'Не выполнимо', 'details': ' '.join(reasons), 'plan': None}
-    return {'status': 'Не выполнимо', 'details': 'Команда не поддерживается в этой версии.', 'plan': None}
-
-# Routes (без изменений)
+# Routes (без изменений, кроме dashboard для админа)
 @app.route('/')
 def index():
     if 'user_id' in session:
